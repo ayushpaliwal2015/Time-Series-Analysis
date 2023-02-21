@@ -1,0 +1,412 @@
+---
+title: "BANA 7050: Assignment 1"
+subtitle: "Description and Analysis"
+author: "Ayush Paliwal"
+date: " January 27 2023"
+execute:
+  warning: false
+  message: false
+  error: false
+  
+format:
+  html:
+    code-fold: true
+    
+embed-resources: true
+---
+
+```{r setup}
+
+knitr::opts_chunk$set(fig.align = "center")
+
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(tsibble)
+library(ggplot2)
+library(kableExtra)
+library(forecast)
+library(tidyquant)
+library(zoo)
+library(patchwork)
+library(feasts)
+library(fable)
+```
+
+```{r import}
+
+unemployment = readr::read_csv("UNRATENSA.csv")
+unemployment = unemployment %>%
+  mutate(Date = DATE, )
+
+attach(unemployment)
+
+unemployment = unemployment %>%
+  mutate(Date = yearmonth(DATE), Unemp_Rate = UNRATENSA) %>%
+  select(Date, Unemp_Rate) %>%
+  as_tsibble(index = Date)
+
+
+unemployment_test <- unemployment %>%
+  filter(between(Date, as.Date('2019-01-01'), as.Date('2019-06-01'))) %>%
+  mutate(Date = yearmonth(Date)) %>%
+  as_tsibble()
+```
+
+## Section 1: Introduction
+We will use `Unemployment Rate` data to perform some basic time series analysis. Unemployment Rate is one of the most important economic indicators. It provides insights into economy's spare capacity and unused resources. This data was collected by U.S. Bureau of Labor Statistics and hosted by the website of Federal Reserve Bank of Saint Louise [**see**](https://fred.stlouisfed.org/series/UNRATENSA). It consists of monthly unemployment rates (in %) from January 1948 to December 2022 and is NOT seasonally adjusted. The unemployment rate represents the number of unemployed as a percentage of the labor force. Labor force data are restricted to people 16 years of age and older, who currently reside in 1 of the 50 states or the District of Columbia, who do not reside in institutions (e.g., penal and mental facilities, homes for the aged), and who are not on active duty in the Armed Forces.
+
+  
+The unemployment rate is linked to a variety of factors including recession, depression, technological improvements, job outsourcing, voluntarily leave one job to find another job, pandemic outbreaks, government policies, political instability, natural disasters etc. Give the number of factors which affect the unemployment rate and the difficult to predict them with certainty, makes it difficult to predict the unemployment rate with a high degree of accuracy.
+  
+  
+
+```{r full plot, fig.width=8, fid.height=5}
+
+unemployment %>%
+  ggplot() +
+  geom_line(aes(Date, Unemp_Rate)) +
+  theme_bw() +
+  xlab("Year") +
+  ylab("Unemployment Rate") +
+  ggtitle("Unemployment Rate Over Time") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  geom_vline(xintercept = as.numeric(as.Date("2010-01-01")), color = "red", 
+             lwd = 0.5)  + 
+  geom_vline(xintercept = as.numeric(as.Date("2018-12-01")), color = "red", 
+             lwd = 0.5)  
+
+```
+
+  
+Note: To avoid complications introduced by the COVID pandemic and the 2008 recession, we choose to limit the scope of our analysis to the 8 year time period beginning in January 2010 and end at December 2018 (highlighted in Red)
+
+```{r filter data}
+
+unemployment = unemployment %>%
+  filter(between(Date, as.Date('2010-01-01'), as.Date('2018-12-01')))
+```
+
+## Section 2: Time Series Exploratory Analysis
+
+#### A look at first few rows of data:
+```{r head}
+unemployment %>%
+  head(5) |> kable() |> kable_styling(font_size = 15)
+```
+1. Since the data is monthly, the date only has the month and year
+2. The unemployment rate is in percentage with values rounded off to a single digit place after decimal  
+
+#### Frequency Distribution of Unenployment Rate
+
+```{r more plots, fig.width=8, fid.height=5}
+hist <- unemployment %>%
+  ggplot() +
+  geom_histogram(aes(Unemp_Rate)) +
+  theme_bw()
+
+hist
+
+```
+1. The data does not follow normal distribution, instead it seems to be bimodal
+
+
+#### Summary Statistics:
+Number of Observations: 121  
+Max value: 10.60  
+Min value: 3.3  
+Median value: 5.6  
+Mean value: 6.2  
+1st Quartile value: 4.4  
+3rd Quartile value: 8.2  
+Range: 7.3  
+Standard Deviation: 2.1  
+Start Timestamp: January 2010  
+End Timestamp: December 2018   
+
+    
+#### Plot of Unemployment Rate vs Year-Month:
+```{r sub hist plot, fig.width=8, fid.height=5}
+
+unemployment %>%
+  ggplot() +
+  geom_line(aes(Date, Unemp_Rate)) +
+  theme_bw() +
+  xlab("Year") +
+  ylab("Unemployment Rate") +
+  ggtitle("Unemployment Rate Over Time (2010 - 2018)") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+```
+1. We can clearly see a downward trend with a constant slope
+2. The series does have a seasonality with a fixed period and of Additive type
+3. There is some noise (randomness) in the series as the crest and trough are uneven  
+
+#### Seasonal Plot: Unemployment Rate:
+```{r seasonal plots, fig.width=8, fid.height=5}
+theme_set(theme_classic())
+
+unemployment %>%
+  as.ts() %>%
+  ggseasonplot() + 
+  labs(title="Unemployment Rate by Month For Each Year (2010 - 2018)") + 
+  ylab("Unemployment Rate") +
+  xlab("Month") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+```
+1. Unemployment Rate falls during the Summer months and goes up during the Winter months
+2. The month-wise unemployment rate of each year is lower than that of the same period in the previous year
+3. All the year-wise plot lines follow almost the same seasonality trend  
+  
+## Section 3: Time Series Analysis
+#### Moving Average Analysis:
+```{r MA 2 & 3 plots, fig.width=8, fid.height=5}
+unemployment %>%
+  mutate(MA_2 = rollmean(Unemp_Rate, k = 2, fill = NA),
+         MA_3 = rollmean(Unemp_Rate, k = 3, fill = NA)) %>%
+  pivot_longer(names_to = "rolling_mean_key", values_to = "rolling_mean_value", 
+                    cols = c(MA_2, MA_3)) %>%
+  ggplot() +
+  geom_line(aes(Date, rolling_mean_value, color=rolling_mean_key), size = 1) + 
+  geom_line(aes(Date, Unemp_Rate), size = 1) +
+  xlab("Month") + 
+  ylab("Unemployment Rate") + 
+  labs(title = "Unemployment Rate by Month (MA2 & MA3)", color = "MA Order") +
+  theme_minimal()
+```
+
+```{r MA 4 & 5 plots, fig.width=8, fid.height=5}
+unemployment %>%
+  mutate(MA_4 = rollmean(Unemp_Rate, k = 4, fill = NA),
+         MA_5 = rollmean(Unemp_Rate, k = 5, fill = NA)) %>%
+  pivot_longer(names_to = "rolling_mean_key", values_to = "rolling_mean_value", 
+                    cols = c(MA_4, MA_5)) %>%
+  ggplot() +
+  geom_line(aes(Date, rolling_mean_value, color=rolling_mean_key), size = 1) + 
+  geom_line(aes(Date, Unemp_Rate), size = 1) +
+  xlab("Month") + 
+  ylab("Unemployment Rate") + 
+  labs(title = "Unemployment Rate by Month (MA4 & MA5)", color = "MA Order") +
+  theme_minimal()
+```
+
+```{r MA 6 & 7 plots, fig.width=8, fid.height=5}
+unemployment %>%
+  mutate(MA_6 = rollmean(Unemp_Rate, k = 6, fill = NA),
+         MA_7 = rollmean(Unemp_Rate, k = 7, fill = NA)) %>%
+  pivot_longer(names_to = "rolling_mean_key", values_to = "rolling_mean_value", 
+                    cols = c(MA_6, MA_7)) %>%
+  ggplot() +
+  geom_line(aes(Date, rolling_mean_value, color=rolling_mean_key), size = 1) + 
+  geom_line(aes(Date, Unemp_Rate), size = 1) +
+  xlab("Month") + 
+  ylab("Unemployment Rate") + 
+  labs(title = "Unemployment Rate by Month (MA6 & MA7)", color = "MA Order") +
+  theme_minimal()
+```
+
+1. Moving Average of **Order 3** seems to the most optimum choice for our series balancing between filtering the noise and over-smoothing
+2. Moving Average of Order 4 or above seem to loose the seasonal trend in the series
+3. Moving Averages of Order 2 seem to contain some noise 
+  
+#### Time Series Decomposition: Trend + Remainder
+We will be using moving average of Order 3 to decompose the series 
+```{r Smoothing, fig.width=8, fid.height=5}
+unemployment_decomp <- unemployment %>%
+  mutate(
+    ma_3_center = rollapply(
+      Unemp_Rate, 3, FUN = mean, align = "center", fill = NA
+    )
+  ) %>%
+  mutate(resid = Unemp_Rate - ma_3_center) %>%
+  select(Date, Unemp_Rate, ma_3_center, resid)
+
+unemployment_decomp_plot <- as.data.frame(unemployment_decomp) %>%
+  pivot_longer(
+    c(Unemp_Rate, ma_3_center, resid),
+    names_to = "decomposition",
+    values_to = "value"
+  ) %>%
+  mutate(
+    decomposition = case_when(
+      decomposition == "Unemp_Rate" ~ "Unemployment Rate",
+      decomposition == "ma_3_center" ~ "Trend",
+      decomposition == "resid" ~ "Remainder"
+    )
+  ) %>%
+  mutate(
+    decomposition = factor(
+      decomposition,
+      labels = c(
+        "Unemployment Rate",
+        "Trend",
+        "Remainder"
+      ),
+      levels = c(
+        "Unemployment Rate",
+        "Trend",
+        "Remainder"
+      )
+    )
+  ) 
+
+unemployment_decomp_plot  %>%
+  ggplot() +
+  geom_line(aes(Date, value), size = 1) +
+  facet_wrap(
+    ~decomposition,
+    nrow = 3,
+    scales = "free"
+  ) +
+  theme_bw() +
+  ylab("") +
+  xlab("Month") +
+  ggtitle(
+    "Unemployment Rate = Trend + Remainder"
+  )
+
+```
+1. Using the Moving Average, we removed the noise in our data
+2. The **Trend** component now consists of the linear downward trend and the seasonality trend
+
+#### Time Series Decomposition: Autocorelation In Remainder 
+```{r autocorreltaion in remainder, fig.width=8, fid.height=5}
+df_ma_decomp_lag <- unemployment_decomp %>%
+  drop_na() %>%
+  mutate(across(where(is.numeric), list(lag = lag))) %>%
+  select(
+    Date, Unemp_Rate, Unemp_Rate_lag,
+    ma_3_center, ma_3_center_lag, resid, resid_lag
+  )
+
+df_ma_decomp_auto <- df_ma_decomp_lag %>%  drop_na()
+
+cor_val <- round(cor(df_ma_decomp_auto$Unemp_Rate_lag, df_ma_decomp_auto$Unemp_Rate), 2)
+cor_ma <- round(cor(df_ma_decomp_auto$ma_3_center_lag, df_ma_decomp_auto$ma_3_center), 2)
+cor_resid <- round(cor(df_ma_decomp_auto$resid_lag, df_ma_decomp_auto$resid), 2)
+
+value_plot <- df_ma_decomp_lag %>%
+  ggplot() +
+  geom_point(aes(Unemp_Rate_lag, Unemp_Rate)) +
+  geom_smooth(aes(Unemp_Rate_lag, Unemp_Rate), method = "lm", se = F) +
+  labs(
+    title = "Unemployment Rate",
+    subtitle = paste("Cor = ", cor_val)
+  ) +
+  theme_bw()+
+  ylab('Unemp_Rate')+
+  xlab('Unemp_Rate (Lag)')
+
+ma_3_center_plot <- df_ma_decomp_lag %>%
+  ggplot() +
+  geom_point(aes(ma_3_center_lag, ma_3_center)) +
+  geom_smooth(aes(ma_3_center_lag, ma_3_center), method = "lm", se = F) +
+  labs(
+    title = "Moving Average",
+    subtitle = paste("Cor = ", cor_ma)
+  ) +
+  theme_bw()+
+  ylab('Moving Average')+
+  xlab('Moving Average (Lag)')
+
+resid_plot <- df_ma_decomp_lag %>%
+  ggplot() +
+  geom_point(aes(resid_lag, resid)) +
+  geom_smooth(aes(resid_lag, resid), method = "lm", se = F) +
+  labs(
+    title = "Remainder",
+    subtitle = paste("Cor = ", cor_resid)
+  ) +
+  theme_bw()+
+  ylab('Remainder')+
+  xlab('Remainder (Lag)')
+
+value_plot + ma_3_center_plot + resid_plot
+```
+1. We can see that there is some **Correlation** between the Remainder and Lagged Remainder 
+2. This means that the Remainder in **NOT** pure white noise and can be used to predict the Unemployment 
+
+
+#### Time Series Decomposition: Classical Decomposition
+```{r classical decomposition, fig.width=8, fid.height=5}
+unemployment %>%
+  model(
+    classical_decomposition(Unemp_Rate)
+  ) %>%
+  components() %>%
+  autoplot()
+```
+
+#### Time Series Decomposition: STL Decomposition
+```{r stl decomposition, fig.width=8, fid.height=5}
+unemployment %>%
+  model(
+    STL(Unemp_Rate)
+  ) %>%
+  components() %>%
+  autoplot()
+```
+1. The results obtained from STL and Classical decomposition are almost the same
+2. We can see seasonality in the series just by visually examining the "season_year" (seasonality) component of the decomposition plots
+  
+#### Time Series Decomposition: Seasonality In Remainder
+```{r seasonality analysis, fig.width=8, fid.height=5}
+unemp_add = unemployment %>%
+  as_tsibble() %>%
+  model(
+    classical_decomposition(Unemp_Rate,'additive')
+  ) %>%
+  components() 
+
+unemp_add %>%
+  gg_lag(random, geom = "point", lags = 1:16) +
+  geom_smooth(aes(color=NULL),method='lm',color='red',se=F) + 
+  scale_y_continuous(breaks=c(-0.2,0, 0.2, 0.4)) + 
+  scale_x_continuous(breaks=c(-0.2,0, 0.2, 0.4))
+
+```
+1. There appears to be a **Small Correlation** between the Remainder and the Lagged Remainder values
+
+#### Time Series Decomposition: Estimating Seasonality In Remainder with Linear Regression
+```{r seasonality in remainder with LR, fig.width=8, fid.height=5}
+unrate_month_lm_mod <- lm(random ~ month, data = unemp_add %>% mutate(month = factor(lubridate::month(Date))))
+
+summary(unrate_month_lm_mod)
+```
+1. We used Linear Regression to model the association between the **Residuals** from our decomposition and the **Month**
+2. We observe that the P-values of the month coefficients are not statistically significant and the coefficients are close to zero, which means that the Residuals are **NOT RELATED** to the Month
+3. Hence we can assume that the Residuals from our decomposition are white noise  
+
+#### Time Series Decomposition: Seasonality In Series
+```{r seasonality in time series, fig.width=8, fid.height=5}
+unemployment %>%
+  model(
+    STL(Unemp_Rate)
+  ) %>%
+  components() %>%
+  mutate(month = lubridate::month(Date, label = T, abbr = T)) %>%
+  distinct(month, .keep_all = T) %>%
+  ggplot() +
+  geom_col(aes(month, season_year, fill = month)) +
+  scale_y_continuous(name = "Seasonality Effect in Unemployment Rate", label = scales::percent) +
+  theme_bw()
+```
+1. We plot the Seasonality component of the decomposition in this plot
+2. We can observe significant Seasonality in the series which was expected  
+  
+## Section 4: Time Series Forecasting
+#### Naive Forecasting With Seasonality
+```{r seasonal naive, fig.width=8, fid.height=5}
+
+unemployment %>%
+  model(
+    SNAIVE(Unemp_Rate)
+  ) %>%
+  forecast(h=6) %>%
+  autoplot(as_tibble(bind_rows(as.data.frame(unemployment), as.data.frame(unemployment_test)))) +
+  ylab('Unemployment Rate') + 
+  theme_bw()
+```
+1. The Naive forecast with seasonality does a good job of forecasting the behavior of next 6 point in the series
+2. It is able to produce the seasonality effect quiet accurately 
+3. The model forecasts would have been even more accurate if we had also considered the drift of the series

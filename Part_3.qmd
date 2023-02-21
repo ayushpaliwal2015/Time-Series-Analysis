@@ -1,0 +1,329 @@
+---
+title: "BANA 7050: Assignment 3"
+author: "Ayush Paliwal"
+date: "February 15 2023"
+execute:
+  warning: false
+  message: false
+  error: false
+  
+format:
+  html:
+    code-fold: true
+    
+embed-resources: true
+---
+
+```{r setup}
+
+knitr::opts_chunk$set(fig.align = "center")
+
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(tsibble)
+library(ggplot2)
+library(kableExtra)
+library(forecast)
+library(tidyquant)
+library(zoo)
+library(patchwork)
+library(feasts)
+library(fable)
+library(tseries)
+library(fable.prophet)
+library(prophet)
+library(Metrics)
+```
+
+```{r import}
+
+unemployment = readr::read_csv("UNRATENSA.csv")
+unemployment = unemployment %>%
+  mutate(Date = DATE, )
+
+attach(unemployment)
+
+unemployment = unemployment %>%
+  mutate(Date = DATE, Unemp_Rate = UNRATENSA) %>%
+  select(Date, Unemp_Rate) %>%
+  as_tsibble(index = Date)
+
+unemployment_complete = unemployment %>%
+  filter(between(Date, as.Date('2010-01-01'), as.Date('2019-06-01'))) %>%
+  mutate(Date = yearmonth(Date)) %>%
+  as_tsibble()
+
+unemployment_test <- unemployment %>%
+  filter(between(Date, as.Date('2019-01-01'), as.Date('2019-06-01'))) %>%
+  mutate(Date = yearmonth(Date)) %>%
+  as_tsibble()
+
+unemployment = unemployment %>%
+  filter(between(Date, as.Date('2010-01-01'), as.Date('2018-12-01'))) %>%
+  mutate(Date = yearmonth(Date)) %>%
+  as_tsibble()
+
+```
+
+## Section 1:  
+
+#### Fit and Assess Prophet Model On TRAINING Data:
+```{r fit and assess train}
+
+best_mod = unemployment %>%
+    model(fable.prophet::prophet(Unemp_Rate))
+
+# Get fitted values
+fitted = best_mod %>%
+  augment() %>%
+  .$.fitted
+
+ggplot() +
+  geom_line(aes(unemployment$Date, unemployment$Unemp_Rate)) +
+  geom_line(aes(unemployment$Date, fitted), color = "blue", alpha = 0.7) +
+  theme_bw() +
+  xlab("Month") +
+  ylab("Unemployment Rate") + 
+  labs(title = "Unemployment Rate Actual (Black) & Fitted (Blue) vs Month")
+
+```
+1.  Prophet model accurately fits on the training data  
+
+#### Fit and Assess Prophet Model On TESTING Data:
+```{r fit and assess test}
+unemployment %>%
+    model(fable.prophet::prophet(Unemp_Rate)) %>%
+    forecast(h=6) %>%
+    autoplot(unemployment %>% bind_rows(unemployment_test))+
+    ylab('Unemployment Rate')+
+    xlab('Month')+
+    labs(title = "Unemployment Rate Actual (Black) & Fitted (Blue) vs Month")+
+    theme_bw()
+```
+1.  Default Prophet model accurately forecasts the future values of test data 
+
+  
+#### Methodology Behind The Prophet Model:
+Prophet is a time series forecasting model developed by Facebook. It uses a decomposable model with three main components: trend, seasonality, and holidays. The trend component is modeled using a piecewise linear model, the seasonality component is modeled using Fourier series, and the holiday component is modeled using binary variables. Prophet also allows for the incorporation of external regressors, uncertainty estimation, and trend changepoints.
+
+
+## Section 2: 
+#### Decomposition Of The Time Series Elements:
+```{r prophet decomposition}
+
+prophet_data = unemployment %>% 
+    rename(ds = Date, y = Unemp_Rate)
+
+best_mod = prophet::prophet(prophet_data)
+
+orig_future = make_future_dataframe(best_mod, periods = 6, freq = "month")
+orig_forecast = predict(best_mod,orig_future)
+
+prophet_plot_components(best_mod, orig_forecast)
+```
+1. As observed earlier, on average, the unemployment rate is lower during summer seasons and higher during winter season 
+2. The trend component is close to linear with constant decline  
+  
+#### Change Points Analysis:
+```{r change points analysis}
+plot(best_mod,orig_forecast)+add_changepoints_to_plot(best_mod)+theme_bw()+xlab("Date")+ylab("Unemployment Rate")
+```
+1. A few change points are identified in the trend part by the Prophet model
+2. These change points seem to be reasonable. The slope/inclination of trend component of our time series changes slightly near the change points
+3. Additionally, the almost constant decline in the forecast trend suggests us to consider setting cap/floor and logistic trend  
+4. Hence, we update the model hyperparameters by setting the appropriate values of floor/cap, growth trend type and number of change points  
+
+#### Change Points Analysis: Tuned Hyperparameters
+```{r floor/cap and no change points}
+# Set "floor" in training data
+prophet_data$floor = 0
+prophet_data$cap = 12
+orig_future$floor = 0
+orig_future$cap = 12
+
+sat_model = prophet::prophet(prophet_data,growth ='logistic')
+forecast = predict(sat_model,orig_future)
+plot(sat_model,forecast)+add_changepoints_to_plot(sat_model)+theme_bw()+xlab("Date")+ylab("Unemployment Rate") +ylim(2.5,11)
+```
+1. The **floor of 0** and **cap of 12**, **25 change points** (defalut value) and **logistic growth trend** seem to be optimum choice of hyperparamters
+  
+## Section 3: 
+#### Modelling With Additive Seasonlaity
+```{r additive seasonality}
+additive = prophet::prophet(prophet_data ,growth ='logistic')
+add_fcst = predict(additive,orig_future)
+
+plot(additive,add_fcst, xlab = "Month", ylabel = "Unemployment Rate")+
+ylim(3,10)
+```
+#### Modelling With Multiplicative Seasonlaity
+```{r multiplicative seasonality}
+multiplicative = prophet::prophet(prophet_data ,growth ='logistic', seasonality.mode = 'multiplicative')
+mul_fcst = predict(multiplicative, orig_future)
+
+plot(multiplicative,mul_fcst, xlab = "Month", ylabel = "Unemployment Rate")+
+ylim(3,10)
+```
+
+1. On decomposing the time series, we identify **yearly seasonality** in the time series
+2. The model with Additive seasonality is clearly an overall better fit than the model with Multiplicative seasonality
+3. Additionally, the amplitude of the seasonality component seems to remain constant
+3. Hence, we conclude our time series contains **Additive** seasonality
+4. Since our time series contains monthly data, we won't consider including holidays in our model
+  
+  
+## Section 4: 
+  
+**For the following analysis, we perform rolling window cross validation on training data. We begin with 4 years, and horizon and period of 1 year each.**
+
+```{r rolling window cv}
+unemp_cv_data = unemployment %>%
+  stretch_tsibble(.init = 60, .step = 12)
+
+unemp_cv_data %>%
+    ggplot()+
+    geom_point(aes(Date,factor(.id),color=factor(.id)))+
+    ylab('Iteration')+
+    ggtitle('Samples included in each CV Iteration') + 
+    scale_color_discrete(name = 'Rolling Fold')
+```
+  
+#### Rolling Window Cross-Validation: SEASONALITY TYPE
+```{r rolling cv seasonality}
+
+days_in_year = 365.25
+
+additive.cv <- cross_validation(additive, initial = days_in_year*3, period = days_in_year, horizon = days_in_year, units = "days")
+paste("Additive RMSE:", sqrt(mean((additive.cv$y - additive.cv$yhat)^2)))
+
+
+multiplicative.cv <- cross_validation(multiplicative, initial = days_in_year*3, period = days_in_year, horizon = days_in_year, units = "days")
+paste("Multiplicative RMSE:", sqrt(mean((multiplicative.cv$y - multiplicative.cv$yhat)^2)))
+
+```
+1. **Additive seasonality** has lower RMSE hence a better option
+
+#### Rolling Window Cross-Validation: TREND TYPE
+```{r rolling cv trend}
+
+logistic = prophet::prophet(prophet_data ,growth ='logistic', seasonality.mode = 'additive')
+
+logistic.cv <- cross_validation(logistic, initial = days_in_year*3, period = days_in_year, horizon = days_in_year, units = "days")
+paste("Logistic RMSE:", sqrt(mean((logistic.cv$y - logistic.cv$yhat)^2)))
+
+
+linear = prophet::prophet(prophet_data ,growth ='linear', seasonality.mode = 'additive')
+
+linear.cv <- cross_validation(linear, initial = days_in_year*3, period = days_in_year, horizon = days_in_year, units = "days")
+paste("Linear RMSE:", sqrt(mean((linear.cv$y - linear.cv$yhat)^2)))
+```
+1. **Logistic trend** has lower RMSE hence a better option
+  
+#### Rolling Window Cross-Validation: NUMBER OF CHANGE POINTS
+```{r rolling cv # of change points}
+
+for (n_change_points in seq(0,50,10)) {
+  model = prophet::prophet(prophet_data ,growth ='logistic',
+                          seasonality.mode = 'additive',
+                          n.changepoints = n_change_points)
+  
+  model.cv <- cross_validation(
+    model, 
+    initial = days_in_year*3, 
+    period = days_in_year, horizon = days_in_year, 
+    units = "days")
+  
+  rmse <- sqrt(mean((model.cv$y - model.cv$yhat)^2))
+  print(paste(n_change_points, paste(" Change Point RMSE:", rmse)))
+}
+```
+1. **20 Change Points** has lowest RMSE among 0, 10, 20, 30, 40 & 50 
+
+#### Rolling Window Cross-Validation: CHANGE POINT RANGE
+```{r rolling cv range of change points}
+
+for (cp_range in seq(0.5,1,0.1)) {
+  model = prophet::prophet(prophet_data ,growth ='logistic',
+                          seasonality.mode = 'additive',
+                          n.changepoints = 20,
+                          changepoint.range = cp_range)
+  
+  model.cv <- cross_validation(
+    model, 
+    initial = days_in_year*3, 
+    period = days_in_year, horizon = days_in_year, 
+    units = "days")
+  
+  rmse <- sqrt(mean((model.cv$y - model.cv$yhat)^2))
+  print(paste(cp_range, paste(" Change Point Range RMSE:", rmse)))
+}
+```
+1. **0.8 Change Point Rage** has lowest RMSE among 0.5, 0.6, 0.7, 0.8, 0.9 & 1
+
+#### Rolling Window Cross-Validation: BEST MODEL (Optimum Hyperparams) FORECASTS PLOT
+```{r best model}
+best_model = prophet::prophet(prophet_data ,growth ='logistic',
+                          seasonality.mode = 'additive',
+                          n.changepoints = 20,
+                          changepoint.range = 0.8)
+
+
+best_model.cv <- cross_validation(
+    model, 
+    initial = days_in_year*3, 
+    period = days_in_year, horizon = days_in_year, 
+    units = "days")
+
+
+best_model.cv %>% 
+  mutate(cutoff = year(as.Date(best_model.cv$cutoff)) + 1) %>%
+  ggplot()+
+  geom_line(aes(ds,y)) +
+  geom_line(aes(ds,yhat,color=factor(cutoff)))+
+  theme_bw()+
+  xlab("Month")+
+  ylab("Unemployment Rate")+
+  scale_color_discrete(name = 'Year')
+```
+
+#### Rolling Window Cross-Validation: BEST MODEL PERFORMANCE
+```{r metrics}
+p1<-plot_cross_validation_metric(best_model.cv, metric = 'rmse')
+p2<-plot_cross_validation_metric(best_model.cv,metric = 'mae')
+p3<-plot_cross_validation_metric(best_model.cv,metric = 'mape')
+
+p1+p2+p3
+```
+1. We observe that our models accuracy reduces as we forecast further in the future
+
+
+#### BEST MODEL - 6 POINT FORECAST 
+```{r 6 point forecast}
+
+best_fcst = predict(best_mod,orig_future)
+
+best_fcst %>%
+  mutate(ds = as.Date(ds)) %>%
+  ggplot()+
+  geom_vline(aes(xintercept=ymd("2019-01-01")),color='red')+
+  geom_ribbon(aes(ymin=yhat_lower, ymax=yhat_upper, x=ds), fill='lightblue') + 
+  geom_line(aes(ds, yhat),color='mediumblue')+
+  geom_line(aes(ds, unemployment_complete$Unemp_Rate)) +
+  ylab("Unemployment Rate")+
+  xlab("Month")+ 
+  ggtitle("Out of Sample Performance Blue (January - June 2019)")+
+  theme_bw() +
+  ylim(2.5,10) 
+  
+
+pred = tail(best_fcst$yhat, 6)
+actual = tail(unemployment_test$Unemp_Rate, 6)
+
+paste("RMSE", paste(sqrt(mean((pred - actual)^2))))
+paste("MAE", paste(mean(abs((pred - actual)))))
+paste("MAPE", paste(mean(abs((pred - actual)/(actual)))))
+```
+1. The Optimized Prophet model makes sense and is forecasting quiet accurately
+2. The RMSE on 6 month forecast (RMSE: 0.18) is almost half of what we got on Rolling window cross validation (RMSE: 0.32)
+3. The forecast values are within 4.4% margin of actual values

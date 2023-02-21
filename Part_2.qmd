@@ -1,0 +1,277 @@
+---
+title: "BANA 7050: Assignment 2"
+author: "Ayush Paliwal"
+date: "February 9 2023"
+execute:
+  warning: false
+  message: false
+  error: false
+  
+format:
+  html:
+    code-fold: true
+    
+embed-resources: true
+---
+
+```{r setup}
+
+knitr::opts_chunk$set(fig.align = "center")
+
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(tsibble)
+library(ggplot2)
+library(kableExtra)
+library(forecast)
+library(tidyquant)
+library(zoo)
+library(patchwork)
+library(feasts)
+library(fable)
+library(tseries)
+```
+
+```{r import}
+
+unemployment = readr::read_csv("UNRATENSA.csv")
+unemployment = unemployment %>%
+  mutate(Date = DATE, )
+
+attach(unemployment)
+
+unemployment = unemployment %>%
+  mutate(Date = yearmonth(DATE), Unemp_Rate = UNRATENSA) %>%
+  select(Date, Unemp_Rate) %>%
+  as_tsibble(index = Date)
+
+unemployment_test <- unemployment %>%
+  filter(between(Date, as.Date('2019-01-01'), as.Date('2019-06-01'))) %>%
+  mutate(Date = yearmonth(Date)) %>%
+  as_tsibble()
+
+unemployment = unemployment %>%
+  filter(between(Date, as.Date('2010-01-01'), as.Date('2018-12-01')))
+
+```
+
+## Section 1:  
+
+#### Rolling mean to detect if time series is **Mean Stationary**:
+```{r mean stationary check}
+
+k = 12
+unemployment_roll <- unemployment %>%
+  mutate(
+    unemp_mean = zoo::rollmean(
+      Unemp_Rate, 
+      k = k, 
+      fill = NA),
+    Unemp_sd = zoo::rollapply(
+      Unemp_Rate, 
+      FUN = sd, 
+      width = k, 
+      fill = NA)
+  )
+
+unemployment_roll_mean <- unemployment_roll %>%
+  ggplot() +
+    geom_line(aes(Date, Unemp_Rate)) +
+  geom_line(aes(Date, unemp_mean),color='orange') +
+  theme_bw() +
+  ggtitle("Unemployment Rate Mean over Time (12 month rolling window)") +
+  ylab("Unemployment Rate") +
+  xlab("Month")
+
+unemployment_roll_mean
+```
+
+1.  We can clearly observe that the rolling mean follows an almost linearly decreasing trend
+
+2.  Since the rolling mean of the series is changing with time, the time-series is **NOT Mean Stationary**  
+
+
+#### Rolling standard deviation to detect if time series is **Variance Stationary**:
+```{r variance stationary check}
+unemployment_roll_sd <- unemployment_roll %>%
+  ggplot() +
+  geom_line(aes(Date, Unemp_sd)) +
+  geom_smooth(aes(Date, Unemp_sd),method='lm',se=F,color='orange')+
+  theme_bw() +
+  ggtitle("Unemployment Rate Standard Deviation over Time (12 month rolling window)") +
+  ylab("Unemployment Rate") +
+  xlab("Month")
+
+unemployment_roll_sd
+```
+
+1.  Although the rolling standard deviation is varying with time, its **magnitude of variation is very small**
+2.  Since the rolling standard deviation is not changing significantly with time, the time-series is **Variance Stationary**  
+3.  Hence there is no need to perform Natural Log or Box-Cox transformation  
+
+#### Seasonal differencing to remove the seasonal effect:
+```{r seasonality differnce}
+unemployment_diff <- unemployment %>%
+  mutate(Unemp_Rate_seasonal_diff = Unemp_Rate - lag(Unemp_Rate, 12)) %>%
+  drop_na() %>%
+  as_tsibble(index=Date)
+
+unemployment_diff %>%
+  ggplot() +
+  geom_line(aes(Date, Unemp_Rate_seasonal_diff)) +
+  geom_smooth(aes(Date, Unemp_Rate_seasonal_diff),method='lm',se=F,color='orange')+
+  theme_bw() +
+  ggtitle("Unemployment Rate Seasonally Adjusted (SA) -> Difference of 12 months") +
+  ylab("Unemployment Rate (SA)") +
+  xlab("Month")+
+  theme_bw()
+
+```
+1.  The seasonality of the series is 12 months and we take the difference considering it 
+2.  There is an almost constant reduction in unemployment rate by 0.6 percent every 12 months over the time period we consider
+
+#### Seasonality testing through KPSS & ADF:
+```{r seasonality testing ADF & KPSS}
+unemployment_diff %>%
+features(Unemp_Rate_seasonal_diff, unitroot_kpss)
+
+
+adf.test(unemployment_diff$Unemp_Rate_seasonal_diff)
+```
+1.  Both the tests suggest the time series is **Non Stationary**  
+
+#### Seasonality testing through KPSS & ADF after 1st Order Integration:
+```{r seasonality testing ADF & KPSS after differencing}
+unemployment_diff <- unemployment_diff %>%
+  mutate(Unemp_Rate_seasonal_diff_I1 = Unemp_Rate_seasonal_diff - lag(Unemp_Rate_seasonal_diff)) %>%
+  drop_na() %>%
+  as_tsibble(index=Date)
+
+unemployment_diff %>%
+features(Unemp_Rate_seasonal_diff_I1, unitroot_kpss)
+
+adf.test(unemployment_diff$Unemp_Rate_seasonal_diff_I1)
+
+unemployment_diff %>%
+  ggplot() +
+  geom_line(aes(Date, Unemp_Rate_seasonal_diff_I1)) +
+  geom_smooth(aes(Date, Unemp_Rate_seasonal_diff_I1),method='lm',se=F,color='orange')+
+  ggtitle("Unemployment Rate (Seasonally Adjusted + First Order of Integration)") +
+  ylab("Unemployment Rate (SA & I(1))") +
+  xlab("Month")+
+  theme_bw()
+```
+1.  We get a stationary time series on taking the first difference of Seasonally Adjusted time series  
+2.  Both, ADF and KPSS test suggest the time series is now **Stationary**  
+
+## Section 2:  
+
+#### ACF and PACF plots for the transformed series:
+```{r acf & pacf}
+acf = unemployment_diff %>%
+  ACF(Unemp_Rate_seasonal_diff_I1,lag_max=60) %>%
+  autoplot()
+
+pacf =  unemployment_diff %>%
+  fill_gaps() %>%
+  PACF(Unemp_Rate_seasonal_diff_I1,lag_max=60) %>%
+  autoplot()
+
+acf + pacf
+```
+1. Based on the ACF and PACF analysis, this process seems to be a combination of Moving Average and Auto Regressive Process but it is unclear
+2. I suspect the order of the time-series (p, d, q) to be (3,1,1)
+3. It seems the time series still contains a significant seasonality component 
+4. Seasonal ARIMA effects (P, D, Q) could be (0,1,1) based on the spikes at lag of multiples of 12
+
+## Section 3:  
+
+#### Build and Comapre models based on AIC and BIC:
+```{r ARIMA based on AIC and BIC}
+models_bic = unemployment %>%
+  model(
+    mod1 = ARIMA(Unemp_Rate~PDQ(0,1,0)+pdq(0,1,1)),
+    mod2 = ARIMA(Unemp_Rate~PDQ(0,1,1)+pdq(0,1,1)),
+    mod3 = ARIMA(Unemp_Rate~PDQ(1,1,0)+pdq(0,1,1)),
+    mod4 = ARIMA(Unemp_Rate~PDQ(2,1,0)+pdq(0,1,1)),
+    mod5 = ARIMA(Unemp_Rate~PDQ(2,1,1)+pdq(0,1,1)),
+    mod6 = ARIMA(Unemp_Rate~PDQ(0,1,2)+pdq(0,1,1)),
+    mod7 = ARIMA(Unemp_Rate~PDQ(1,1,2)+pdq(0,1,1)),
+    mod8 = ARIMA(Unemp_Rate~PDQ(1,1,1)+pdq(0,1,1)),
+    mod9 = ARIMA(Unemp_Rate~PDQ(2,1,2)+pdq(0,1,1)),
+  )
+
+models_bic %>%
+  glance() %>%
+  arrange(BIC)
+```
+1.  Among all the models configurations we tried, **(0,1,1) (0,1,1)** is the **most optimum** based on AIC and BIC scores
+2.  Our **best guess** based on ACF and PACF analysis was **(3,1,1) (0,1,1)**  
+
+#### Predict on the in-smaple data and plot:
+```{r predict on in-sample data}
+best_mod = unemployment %>%
+  model(
+    ARIMA(Unemp_Rate~PDQ(0,1,1)+pdq(0,1,1), stepwise=FALSE, approximation=FALSE)
+  )
+
+# Get fitted values
+fitted = best_mod %>%
+  augment() %>%
+  .$.fitted
+
+ggplot() +
+  geom_line(aes(unemployment$Date, unemployment$Unemp_Rate)) +
+  geom_line(aes(unemployment$Date, fitted), color = "orange", alpha = 0.7) +
+  theme_bw() +
+  xlab("Month") +
+  ylab("Unemployment Rate")
+```
+1.  The in-sample forecast values tend to closely follow the trend in the data  
+
+## Section 4:  
+
+#### Box-Ljung test for residual autocorrelation:
+```{r box-ljung test}
+best_mod %>%
+  gg_tsresiduals()
+
+best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 12, dof = 2)
+```
+1.  We observe significant autocorrelation in residuals for several lag values based on the Box-Ljung test  and ACF plots
+2.  Hence the residuals cannot be considered as white noise 
+
+#### Finding a better model:
+```{r finding the best model}
+best_unrate_mod = unemployment %>%
+  model(ARIMA(approximation=F,stepwise=F))
+
+best_unrate_mod %>%
+  report()
+
+best_unrate_mod %>%
+  gg_tsresiduals()
+
+best_unrate_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 12, dof = 5)
+```
+1. The p-values from the Box-Ljung test are now greater than 0.05 
+2. The ACF plot does not show significant autocorrelation in residuals
+3. Hence the residuals can be considered as White Noise
+4. Our best model is **ARIMA(3,1,0)(2,1,0)[12]**  
+
+#### Generating Forecast:
+```{r generating forecast}
+best_unrate_mod %>%
+  forecast(h=6) %>%
+  autoplot(
+    unemployment %>%
+      bind_rows(unemployment_test)
+  )+
+  theme_bw()
+```
+1. Our forecast values are very close to actual values and seem reasonable
