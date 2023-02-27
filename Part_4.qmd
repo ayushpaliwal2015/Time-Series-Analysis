@@ -1,0 +1,689 @@
+---
+title: "BANA 7050: Assignment 4 - Final Project"
+author: "Ayush Paliwal"
+date: "February 25 2023"
+execute:
+  warning: false
+  message: false
+  error: false
+  
+format:
+  html:
+    code-fold: true
+    
+embed-resources: true
+---
+
+```{r setup}
+
+knitr::opts_chunk$set(fig.align = "center")
+
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(tsibble)
+library(ggplot2)
+library(kableExtra)
+library(forecast)
+library(tidyquant)
+library(zoo)
+library(patchwork)
+library(feasts)
+library(fable)
+library(tseries)
+library(fable.prophet)
+library(prophet)
+library(Metrics)
+```
+
+```{r import}
+
+unemployment = readr::read_csv("UNRATENSA.csv")
+unemployment = unemployment %>%
+  mutate(Date = DATE, )
+
+attach(unemployment)
+
+unemployment = unemployment %>%
+  mutate(Date = DATE, Unemp_Rate = UNRATENSA) %>%
+  select(Date, Unemp_Rate) %>%
+  as_tsibble(index = Date)
+
+```
+
+## Section 1: Exploratory Data Analysis and Time Series Decomposition
+
+#### Introduction:
+We will use `Unemployment Rate` data to perform some basic time series analysis. Unemployment Rate is one of the most important economic indicators. It provides insights into economy's spare capacity and unused resources. This data was collected by U.S. Bureau of Labor Statistics and hosted by the website of Federal Reserve Bank of Saint Louise [**see**](https://fred.stlouisfed.org/series/UNRATENSA). It consists of monthly unemployment rates (in %) from January 1948 to December 2022 and is NOT seasonally adjusted. The unemployment rate represents the number of unemployed as a percentage of the labor force. Labor force data are restricted to people 16 years of age and older, who currently reside in 1 of the 50 states or the District of Columbia, who do not reside in institutions (e.g., penal and mental facilities, homes for the aged), and who are not on active duty in the Armed Forces.
+
+  
+The unemployment rate is linked to a variety of factors including recession, depression, technological improvements, job outsourcing, voluntarily leave one job to find another job, pandemic outbreaks, government policies, political instability, natural disasters etc. Give the number of factors which affect the unemployment rate and the difficult to predict them with certainty, makes it difficult to predict the unemployment rate with a high degree of accuracy.
+ 
+```{r compelete data}
+
+unemployment %>%
+  ggplot() +
+  geom_line(aes(Date, Unemp_Rate)) +
+  theme_bw() +
+  xlab("Year") +
+  ylab("Unemployment Rate") +
+  ggtitle("Unemployment Rate Over Time") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  geom_vline(xintercept = as.numeric(as.Date("2010-01-01")), color = "red", 
+             lwd = 0.5)  + 
+  geom_vline(xintercept = as.numeric(as.Date("2019-12-01")), color = "red", 
+             lwd = 0.5)
+
+
+unemployment_complete = unemployment %>%
+  filter(between(Date, as.Date('2010-01-01'), as.Date('2019-12-01'))) %>%
+  mutate(Date = yearmonth(Date)) %>%
+  as_tsibble()
+
+unemployment_test <- unemployment %>%
+  filter(between(Date, as.Date('2018-01-01'), as.Date('2019-12-01'))) %>%
+  mutate(Date = yearmonth(Date)) %>%
+  as_tsibble()
+
+unemployment = unemployment %>%
+  filter(between(Date, as.Date('2010-01-01'), as.Date('2017-12-01'))) %>%
+  mutate(Date = yearmonth(Date)) %>%
+  as_tsibble()
+
+```
+**Note**: To avoid complications introduced by the COVID pandemic and the 2008 recession, we choose to limit the scope of our analysis to the 10 year time period beginning in January 2010 and end at December 2019 (highlighted in Red)
+
+#### Visialization & Summary Statistics:  
+  
+We begin our analysis by visualizing our data and then move to calculating summary statistics 
+
+```{r seasonality plots, fig.width=12, fig.height=6}
+
+unemp_train_plot <- unemployment %>%
+  ggplot() +
+  geom_line(aes(Date, Unemp_Rate)) +
+  theme_bw() +
+  xlab("Year") +
+  ylab("Unemployment Rate") +
+  ggtitle("Unemployment Rate Over Time (2010 - 2017)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+theme_set(theme_classic())
+
+season_wise_unemp_train_plot <- unemployment %>%
+  as.ts() %>%
+  ggseasonplot() + 
+  labs(title="Unemployment Rate by Month For Each Year (2010 - 2017)") + 
+  ylab("Unemployment Rate") +
+  xlab("Month") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+unemp_train_plot + season_wise_unemp_train_plot
+```
+We can clearly see a **downward trend with a constant slope** in our time series. It starts with **10.6% in 2010 and falls down to 3.9% in 2017**. The series does have a **seasonality** with a fixed period (**12 months**) and of **Additive type**. The **Unemployment Rate is lower during the Summer months and higher during the Winter months**. There is some **noise (randomness) in the series** as the crest and trough are uneven.
+
+```{r frequency distribution plots, fig.width=6, fig.height=3}
+hist <- unemployment %>%
+  ggplot() +
+  geom_histogram(aes(Unemp_Rate)) +
+  theme_bw() + 
+  xlab("Unemployment Rate") +
+  ggtitle("Unemployment Rate - Histogram") 
+
+
+
+box <- unemployment %>%
+  ggplot(aes(x=factor(0),Unemp_Rate)) + 
+  geom_boxplot() + 
+  ylab("Unemployment Rate") +
+  xlab("") +
+  ggtitle("Unemployment Rate  - Box Plot") + 
+  theme(axis.title.x=element_blank(),axis.text.x=element_blank(),axis.ticks.x=element_blank())
+
+hist + box
+```
+The time series data **does not follow normal distribution**, instead it seems to be **bimodal**
+
+
+Number of Observations: 96  
+Max value: 10.60  
+Min value: 3.9  
+Median value: 6.9 
+Mean value: 6.8  
+1st Quartile value: 5.1 
+3rd Quartile value: 8.5  
+Range: 6.7  
+Standard Deviation: 1.9  
+Start Timestamp: January 2010  
+End Timestamp: December 2017  
+
+Our monthly unemployment data spans from January 2010 to December 2017, i.e. 96 months. The unemployment rate has a wide spread with standard deviation of 1.9% and range of 6.7%. 
+  
+#### Moving Average Analysis:  
+  
+Upon experimenting with several Moving Average order values, we find MA of order 3 to be most optimum choice for balancing between filtering the noise and over-smoothing
+```{r moving average analysis}
+
+unemployment %>%
+  mutate(MA_3 = rollmean(Unemp_Rate, k = 3, fill = NA)) %>%
+  pivot_longer(names_to = "rolling_mean_key", values_to = "rolling_mean_value", 
+                    cols = c(MA_3)) %>%
+  ggplot() +
+  geom_line(aes(Date, rolling_mean_value, color=rolling_mean_key), size = 1) + 
+  geom_line(aes(Date, Unemp_Rate), size = 1) +
+  xlab("Month") + 
+  ylab("Unemployment Rate") + 
+  labs(title = "Unemployment Rate by Month (MA 3)", color = "MA Order") +
+  theme_minimal()
+
+```
+
+#### Time Series Decomposition (STL):  
+  
+```{r stl decomposition}
+unemployment %>%
+  model(
+    STL(Unemp_Rate)
+  ) %>%
+  components() %>%
+  autoplot()
+```
+
+The decomposition shows **significant seasonality** in our time series. The seasonality component has a one year cycle with lower unemployment rate at warmer periods of the year. The trend component of decomposition follows an almost linearly decreasing trend.
+
+We further used Linear Regression to model the association between the Residuals from our decomposition and the Month. We observe the P-values of the month coefficients are not statistically significant and the coefficients are close to zero, which means **the Residuals are NOT RELATED to the Month**
+Hence we can assume **the Residuals** from our decomposition **are white noise**  
+
+## Section 2: ARIMA Modeling  
+#### Variance and Mean Stationary Test
+```{r rolling mean and sd plot, fig.width=16, fig.height=6}
+k = 12
+unemployment_roll <- unemployment %>%
+  mutate(
+    unemp_mean = zoo::rollmean(
+      Unemp_Rate, 
+      k = k, 
+      fill = NA),
+    Unemp_sd = zoo::rollapply(
+      Unemp_Rate, 
+      FUN = sd, 
+      width = k, 
+      fill = NA)
+  )
+
+unemployment_roll_mean <- unemployment_roll %>%
+  ggplot() +
+    geom_line(aes(Date, Unemp_Rate)) +
+  geom_line(aes(Date, unemp_mean),color='orange') +
+  theme_bw() +
+  ggtitle("Unemployment Rate Mean over Time (12 month rolling window)") +
+  ylab("Unemployment Rate") +
+  xlab("Month")
+
+unemployment_roll_sd <- unemployment_roll %>%
+  ggplot() +
+  geom_line(aes(Date, Unemp_sd)) +
+  geom_smooth(aes(Date, Unemp_sd),method='lm',se=F,color='orange')+
+  theme_bw() +
+  ggtitle("Unemployment Rate Standard Deviation over Time (12 month rolling window)") +
+  ylab("Unemployment Rate") +
+  xlab("Month")
+
+unemployment_roll_mean + unemployment_roll_sd
+```
+
+The **rolling mean** follows an almost **linearly decreasing trend** which indicates the time-series is **NOT Mean Stationary**. Although the rolling standard deviation is varying with time, its magnitude of variation is very small. Since its not changing significantly with time, the time-series is **Variance Stationary**. Hence there is no need to perform Natural Log or Box-Cox transformation.  
+
+
+#### Removing Seasonality & Making It Mean Stationary:
+```{r seasonal differenceing, fig.width=16, fig.height=6}
+
+unemployment_diff <- unemployment %>%
+  mutate(Unemp_Rate_seasonal_diff = Unemp_Rate - lag(Unemp_Rate, 12)) %>%
+  drop_na() %>%
+  as_tsibble(index=Date)
+
+sa <- unemployment_diff %>%
+  ggplot() +
+  geom_line(aes(Date, Unemp_Rate_seasonal_diff)) +
+  geom_smooth(aes(Date, Unemp_Rate_seasonal_diff),method='lm',se=F,color='orange')+
+  theme_bw() +
+  ggtitle("Unemployment Rate Seasonally Adjusted (SA) -> Difference of 12 months") +
+  ylab("Unemployment Rate (SA)") +
+  xlab("Month")+
+  theme_bw()
+
+
+
+unemployment_diff <- unemployment_diff %>%
+  mutate(Unemp_Rate_seasonal_diff_I1 = Unemp_Rate_seasonal_diff - lag(Unemp_Rate_seasonal_diff)) %>%
+  drop_na() %>%
+  as_tsibble(index=Date)
+
+sa_1i <- unemployment_diff %>%
+  ggplot() +
+  geom_line(aes(Date, Unemp_Rate_seasonal_diff_I1)) +
+  geom_smooth(aes(Date, Unemp_Rate_seasonal_diff_I1),method='lm',se=F,color='orange')+
+  ggtitle("Unemployment Rate (Seasonally Adjusted + First Order of Integration)") +
+  ylab("Unemployment Rate (SA & I(1))") +
+  xlab("Month")+
+  theme_bw()
+
+sa + sa_1i
+```
+
+The seasonality of the series is 12 months and we take the difference considering it. There is an almost **constant reduction in unemployment rate by 0.6 percent every 12 months** over the time period we consider.  
+
+Both **KPSS (p-value: 0.01)** & **ADF (p-value: 0.69)** test suggest the seasonally adjusted time series is **Non Stationary**. Hence we proceed to perform 1st Order Integration.  
+
+We get a **stationary time series on taking the first difference** of Seasonally Adjusted time series.
+Both, **ADF (p-value: 0.1)** and **KPSS (p-value: 0.01)** test suggest the time series is now **Stationary**
+
+#### ACF & PACF Plot Analysis:
+```{r acf & pacf}
+
+acf = unemployment_diff %>%
+  ACF(Unemp_Rate_seasonal_diff_I1,lag_max=60) %>%
+  autoplot()
+
+pacf =  unemployment_diff %>%
+  fill_gaps() %>%
+  PACF(Unemp_Rate_seasonal_diff_I1,lag_max=60) %>%
+  autoplot()
+
+acf + pacf
+```
+Based on the ACF and PACF plots of the transformed time series, the process seems to be a combination of Moving Average and Auto Regressive Process but it is unclear. I suspect the order of the time-series (p, d, q) to be (3,1,1). It seems the time series still contains a considerable seasonality component. Seasonal ARIMA effects (P, D, Q) could be (0,1,1) based on the spikes at lag of multiples of 12.  
+
+
+#### ARIMA Model Selection Based On AIC & BIC:  
+
+We train ARIMA models on a bunch of potentially optimum configurations to to find the one with the lowest AIC & BIC score :- 
+  
+Model 1 = PDQ(0,1,0) + pdq(0,1,1)  
+Model 2 = PDQ(0,1,1) + pdq(0,1,1)  
+Model 3 = PDQ(1,1,0) + pdq(0,1,1)  
+Model 4 = PDQ(2,1,0) + pdq(0,1,1)  
+Model 5 = PDQ(2,1,1) + pdq(0,1,1)  
+Model 6 = PDQ(0,1,2) + pdq(0,1,1)  
+Model 7 = PDQ(1,1,2) + pdq(0,1,1)  
+Model 8 = PDQ(1,1,1) + pdq(0,1,1)  
+Model 9 = PDQ(2,1,2) + pdq(0,1,1)  
+Model 10 = PDQ(3,1,1) + pdq(0,1,1) * Proposed Optimum Configuration  
+
+```{r model by AIC and BIC}
+models_bic = unemployment %>%
+  model(
+    mod1 = ARIMA(Unemp_Rate~PDQ(0,1,0)+pdq(0,1,1)),
+    mod2 = ARIMA(Unemp_Rate~PDQ(0,1,1)+pdq(0,1,1)),
+    mod3 = ARIMA(Unemp_Rate~PDQ(1,1,0)+pdq(0,1,1)),
+    mod4 = ARIMA(Unemp_Rate~PDQ(2,1,0)+pdq(0,1,1)),
+    mod5 = ARIMA(Unemp_Rate~PDQ(2,1,1)+pdq(0,1,1)),
+    mod6 = ARIMA(Unemp_Rate~PDQ(0,1,2)+pdq(0,1,1)),
+    mod7 = ARIMA(Unemp_Rate~PDQ(1,1,2)+pdq(0,1,1)),
+    mod8 = ARIMA(Unemp_Rate~PDQ(1,1,1)+pdq(0,1,1)),
+    mod9 = ARIMA(Unemp_Rate~PDQ(2,1,2)+pdq(0,1,1)),
+    mod10 = ARIMA(Unemp_Rate~PDQ(3,1,1)+pdq(0,1,1)),
+  )
+
+kable(models_bic |>
+  glance() |>
+  arrange(BIC) |>
+  select(.model, sigma2, log_lik, AIC, BIC),
+  caption = "Model BIC & AIC Comparison")
+```
+
+Among all the models configurations we tried, (0,1,1) (0,1,1) is the most optimum based on AIC and BIC scores.   
+
+We observe **significant autocorrelation in residuals** for several lag values based on the **Box-Ljung test (lb_pvalue: 0.005)**. Hence the residuals cannot be considered as white noise
+
+#### Automated ARIMA Hyperparameter Selection
+```{r Auto ARIMA}
+best_unrate_mod = unemployment %>%
+  model(ARIMA(approximation=F,stepwise=F))
+
+best_unrate_mod %>%
+  report()
+```
+```{r L - Jung - Box}
+best_unrate_mod %>%
+  gg_tsresiduals()
+
+best_unrate_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 12, dof = 4)
+```
+The **p-values** from the **Box-Ljung test** are now **greater than 0.05**. The ACF plot does not show significant autocorrelation in residuals. Hence the **residuals** can be considered as **White Noise**.
+Our **optimum model is ARIMA(1,1,1)(2,1,0)[12] ** 
+
+## Section 3: Meta Prophet Model
+  
+#### Prophet - Decomposition:  
+
+```{r prophet decomposition}
+
+prophet_model <- fable.prophet::prophet(Unemp_Rate ~ growth(type = 'linear') +
+                                          season(type = "additive", period = 12))
+unemployment %>% model(prophet_model) %>% 
+  components() %>% 
+  autoplot() +
+  xlab("Month")
+
+```
+As observed earlier, on average, the **unemployment rate** is **lower during summer seasons** and **higher during winter season**. The **trend** component is close to **linear with constant decline**. Results from Prophet decomposition are slightly different from those of STL decomposition.  
+  
+#### Changepoints Analysis On Default Settings:  
+```{r change point analysis}
+
+prophet_data = unemployment %>% 
+    rename(ds = Date, y = Unemp_Rate)
+
+best_mod = prophet::prophet(prophet_data)
+
+orig_future = make_future_dataframe(best_mod, periods = 0.1, freq = "month")
+orig_forecast = predict(best_mod,orig_future)
+
+plot(best_mod, orig_forecast)+add_changepoints_to_plot(best_mod)+theme_bw()+xlab("Month")+ylab("Unemployment Rate")
+```
+  
+A few change points are identified in the trend part by the Prophet model. These change points seem to be reasonable. The **slope/inclination** of trend component of our time series **changes slightly near the change points**. But we should try some feasible values of change point hyperparameters.
+  
+#### Tuning Changepoint Hyperparameters:  
+For the following analysis, we perform **Rolling Window Cross Validation** on training data. We begin with **initial data of 3 years, and horizon and period of 1 year each**. We use this cross validation strategy **to find the optimum value of each considered hyperparameter**.
+
+###### Number of Change Points:
+```{r no. of change points}
+
+days_in_year = 365.25
+
+for (n_change_points in seq(0,40,10)) {
+  model = prophet::prophet(prophet_data ,growth ='linear',
+                          seasonality.mode = 'additive',
+                          n.changepoints = n_change_points)
+  
+  model.cv <- cross_validation(
+    model, 
+    initial =3*days_in_year, 
+    period = 1*days_in_year, horizon = 1*days_in_year, 
+    units = "days")
+  
+  rmse <- sqrt(mean((model.cv$y - model.cv$yhat)^2))
+  print(paste(n_change_points, paste(" Change Point RMSE:", rmse)))
+}
+
+```
+**30 Change Points** has lowest RMSE among 0, 10, 20, 30 & 40 
+
+###### Change Points Range:
+
+```{r change points range}
+
+for (cp_range in seq(0.7,1,0.1)) {
+  model = prophet::prophet(prophet_data ,growth ='linear',
+                          seasonality.mode = 'additive',
+                          n.changepoints = 30,
+                          changepoint.range = cp_range)
+  
+  model.cv <- cross_validation(
+    model, 
+    initial =3*days_in_year, 
+    period = 1*days_in_year, horizon = 1*days_in_year, 
+    units = "days")
+  
+  rmse <- sqrt(mean((model.cv$y - model.cv$yhat)^2))
+  print(paste(cp_range, paste(" Change Point Range RMSE:", rmse)))
+}
+```
+**0.9 Change Point Range** has lowest RMSE among 0.7, 0.8, 0.9 & 1  
+  
+#### Tuning Trend Type Hyperparameters:  
+
+```{r logistic vs linear trend}
+
+prophet_data$floor = 0
+prophet_data$cap = 12
+orig_future$floor = 0
+orig_future$cap = 12
+
+logistic = prophet::prophet(prophet_data ,growth ='logistic', seasonality.mode = 'additive', n.changepoints = 30, changepoint.range = 0.9)
+
+logistic.cv <- cross_validation(logistic, initial =3*days_in_year, period = 1*days_in_year, horizon = 1*days_in_year, units = "days")
+paste("Logistic RMSE:", sqrt(mean((logistic.cv$y - logistic.cv$yhat)^2)))
+
+linear = prophet::prophet(prophet_data ,growth ='linear', seasonality.mode = 'additive', n.changepoints = 30, changepoint.range = 0.9)
+
+linear.cv <- cross_validation(linear, initial =3*days_in_year, period = 1*days_in_year, horizon = 1*days_in_year, units = "days")
+paste("Linear RMSE:", sqrt(mean((linear.cv$y - linear.cv$yhat)^2)))
+```
+The **logistic** growth trend with **floor of 0 and cap of 12** seem to be optimum choice
+
+#### Tuning Seasonality Hyperparameters:
+```{r seasonality type}
+days_in_year = 365.25
+
+additive = prophet::prophet(prophet_data ,growth ='logistic', seasonality.mode = 'additive', n.changepoints = 30, changepoint.range = 0.9)
+multiplicative = prophet::prophet(prophet_data ,growth ='logistic', seasonality.mode = 'multiplicative', n.changepoints = 30, changepoint.range = 0.9)
+
+
+additive.cv <- cross_validation(additive, initial =3*days_in_year, period = 1*days_in_year, horizon = 1*days_in_year, units = "days")
+paste("Additive RMSE:", sqrt(mean((additive.cv$y - additive.cv$yhat)^2)))
+
+multiplicative.cv <- cross_validation(multiplicative, initial =3*days_in_year, period = 1*days_in_year, horizon = 1*days_in_year, units = "days")
+paste("Multiplicative RMSE:", sqrt(mean((multiplicative.cv$y - multiplicative.cv$yhat)^2)))
+```
+
+Although the RMSE of Additive seasonality is more than that of Multiplicative, we already know from the decomposition that **our time series is of Additive seasonality type** with frequency of one year. Also, since our time series contains monthly data, we won’t consider including holidays in our model.
+  
+## Section 4: Model Comparison and Validation:  
+  
+For the following analysis, we perform **Rolling Window Cross Validation** on training data. We begin with **initial data 6 years, and horizon and period of 1 year each**. We use this cross validation to **compare Naive, Naive with Drift, Seasonal Naive with Drift, ARIMA (Best) & Prophet (Best) models**. 
+**Note**: We needed at least 6 years of data to succesfully train the ARIMA (Best) model with optimum hyperparameters.  
+  
+```{r rolling cross validation}
+attach(unemployment)
+
+unemp_rate_cv_data = unemployment %>%
+  stretch_tsibble(.init = 72, .step = 12) %>%
+  mutate(Year = case_when(
+      .id  == 1 ~ 2016,
+      .id  == 2 ~ 2017
+  )) %>%
+  select(Date, Unemp_Rate, Year)
+
+unemp_rate_cv_data %>%
+    filter(.id < 3) %>%
+    ggplot()+
+    geom_point(aes(Date,factor(Year),color=factor(Year)))+
+    ylab('Year')+
+    xlab('Month')+
+    ggtitle('Samples included in each CV Iteration') + 
+    scale_color_discrete(name='Iteration')
+```
+
+```{r all but prophet rolling cross validation}
+unemp_rate_cv_forecast = unemp_rate_cv_data %>%
+  model(
+    naive = NAIVE(Unemp_Rate),
+    naive_w_drift = NAIVE(Unemp_Rate ~ drift()),
+    seasonal_naive_w_drift = SNAIVE(Unemp_Rate ~ drift()),
+    arima = fable::ARIMA(Unemp_Rate~pdq(1,1,1) + PDQ(2,1,0)),
+    ) %>%
+  forecast(h = 12)
+
+
+unemp_rate_cv_forecast %>%
+    as_tsibble() %>%
+    select(-Unemp_Rate) %>%
+    left_join(
+        unemployment
+    ) %>%
+    filter(.id < 3) %>%
+    ggplot()+
+    geom_line(aes(Date,Unemp_Rate))+
+    geom_line(aes(Date,.mean,color=factor(.id),linetype=.model))+
+    scale_color_discrete(name='Year')+
+    xlab("Month")+
+    ylab("Unemployment Rate")+
+    theme_bw()
+
+```
+
+```{r prophet rolling cross validation}
+
+prophet = prophet::prophet(prophet_data ,growth ='logistic', seasonality.mode = 'additive', n.changepoints = 30, changepoint.range = 0.9)
+
+best_model.cv <- cross_validation(
+    prophet, 
+    initial = days_in_year*5, 
+    period = days_in_year, horizon = days_in_year, 
+    units = "days")
+
+
+prophet_roll_cv <- best_model.cv %>% 
+  mutate(cutoff = year(as.Date(best_model.cv$cutoff)) + 1) %>%
+  ggplot()+
+  geom_line(aes(ds,y)) +
+  geom_line(aes(ds,yhat,color=factor(cutoff)))+
+  theme_bw()+
+  xlab("Month")+
+  ylab("Unemployment Rate")+
+  ggtitle("Prophet - Rolling Cross Validation") + 
+  scale_color_discrete(name = 'Year')
+
+prophet_roll_cv
+``` 
+  
+We calculate the RMSE of 2 rolling folds (2016 & 2017) for each model we consider:  
+```{r rolling cv rmse comparison}
+
+unemp_rate_cv_forecast_cp = unemp_rate_cv_forecast %>%
+    as_tsibble() %>%
+    select(-Unemp_Rate) %>%
+    left_join(
+        unemployment
+    ) %>%
+    drop_na()
+  
+model_names = unique(unemp_rate_cv_forecast_cp$.model)
+
+
+for (mondel_name in model_names) {
+  model_rcv = unemp_rate_cv_forecast_cp[unemp_rate_cv_forecast_cp$.model == mondel_name, ]
+  rmse = sqrt(mean((model_rcv$.mean - model_rcv$Unemp_Rate)^2))
+  print(paste(mondel_name, paste(" RMSE:", round(rmse, 4))))
+  
+}
+
+  rmse = sqrt(mean((prophet_roll_cv$data$y - prophet_roll_cv$data$yhat)^2))
+  print(paste("Prophet", paste(" RMSE:", round(rmse, 4))))
+```
+The **Naive forecast outperforms** every other model. This is because the ARIMA, Prophet and SNAIVE-with-Drift models could not correctly predict the **change in the trend in the year 2016**. The slope of the **trend became less steep in 2016**. This led to a huge deviation in the trend component of forecast of these models. These models out performed Naive model in the year 2017 when they were trained on 2016 year data.
+
+
+#### Testing All Model Performance On Test Data (Jan 2018 - Dec 2019)
+```{r testing performance}
+
+cons_sent_test_data = unemployment_complete %>%
+  stretch_tsibble(.init = 96, .step = 24) 
+
+
+
+
+
+unemp_rate_test_forecast = cons_sent_test_data %>%
+  model(
+    naive = NAIVE(Unemp_Rate),
+    naive_w_drift = NAIVE(Unemp_Rate ~ drift()),
+    seasonal_naive_w_drift = SNAIVE(Unemp_Rate ~ drift()),
+    arima = fable::ARIMA(Unemp_Rate~pdq(1,1,1) + PDQ(2,1,0)),
+    ) %>%
+  forecast(h = 24)
+
+
+unemp_rate_test_forecast %>%
+    as_tsibble() %>%
+    select(-Unemp_Rate) %>%
+    left_join(
+        unemployment_complete
+    ) %>%
+    filter(.id == 1) %>%
+    ggplot()+
+    geom_line(aes(Date,Unemp_Rate))+
+    geom_line(aes(Date,.mean,linetype=.model), color="red")+
+    xlab("Month")+
+    ylab("Unemployment Rate")+
+    theme_bw()
+
+
+
+
+
+
+
+
+
+prophet_data_complete = unemployment_complete %>% 
+    rename(ds = Date, y = Unemp_Rate)
+
+prophet_data_complete$floor = 0
+prophet_data_complete$cap = 12
+
+prophet = prophet::prophet(prophet_data_complete ,growth ='logistic', seasonality.mode = 'additive', n.changepoints = 30, changepoint.range = 0.9)
+
+best_model.cv <- cross_validation(
+    prophet, 
+    initial = 7*days_in_year, 
+    period = 2*days_in_year, horizon = 2*days_in_year, 
+    units = "days")
+
+
+prophet_roll_cv <- best_model.cv %>% 
+  mutate(cutoff = year(as.Date(best_model.cv$cutoff)) + 1) %>%
+  ggplot()+
+  geom_line(aes(ds,y)) +
+  geom_line(aes(ds,yhat,color=factor(cutoff)), show.legend = FALSE)+
+  theme_bw()+
+  xlab("Month")+
+  ylab("Unemployment Rate")+
+  ggtitle("Prophet - Test Data Forecast (Red)") 
+
+prophet_roll_cv
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+unemp_rate_test_forecast_cp = unemp_rate_test_forecast %>%
+    as_tsibble() %>%
+    select(-Unemp_Rate) %>%
+    left_join(
+        unemployment_complete
+    ) %>%
+    drop_na()
+  
+model_names = unique(unemp_rate_test_forecast_cp$.model)
+
+
+for (mondel_name in model_names) {
+  model_rcv = unemp_rate_test_forecast_cp[unemp_rate_test_forecast_cp$.model == mondel_name, ]
+  rmse = sqrt(mean((model_rcv$.mean - model_rcv$Unemp_Rate)^2))
+  print(paste(mondel_name, paste(" RMSE:", round(rmse, 4))))
+  
+}
+
+  rmse = sqrt(mean((prophet_roll_cv$data$y - prophet_roll_cv$data$yhat)^2))
+  print(paste("Prophet", paste(" RMSE:", round(rmse, 4))))
+```
+Finally, based on RMSE, **Prophet model performs the best** among all models and ARIMA model is just slightly behind Prophet. **Prophet model forecast values are within 4.4% margin of actual values**.
